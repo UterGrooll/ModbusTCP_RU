@@ -1,6 +1,6 @@
 ## Установка вручную
 
-1. Скачайте и распакуйте архив `ModbusTCP_RU.zip` [`download/`](download/) с библиотекой в папку:
+1. Скачайте и распакуйте архив - [ModbusTCP_RU.zip](download/ModbusTCP_RU.zip) с библиотекой в папку:
 
 ```
 C:\Users\UterGrooll\Documents\Arduino\libraries\ModbusTCP_RU
