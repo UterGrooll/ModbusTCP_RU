@@ -8,16 +8,19 @@
   Написано и протестировано с Arduino 2.3.5
 
   Для этой библиотеки в качестве основы использовались следующие библиотеки:
-  
-    [1] Mudbus.h — библиотека Arduino для реализации Modbus TCP Slave.
+
+    
+    [1] MgsModbus-v0.1.1 — библиотека Arduino для реализации Modbus TCP.
+        Авторское право (C) 2013 https://myarduinoprojects.com/modbus.html
+    [2] Mudbus.h — библиотека Arduino для реализации Modbus TCP Slave.
         Авторское право (C) 2011  Dee Wykoff
-    [2] Коды функций 15 и 16 добавлены Martin Pettersson
+    [3] Коды функций 15 и 16 добавлены Martin Pettersson
 
   Для написания этой библиотеки использовались следующие спецификации:
   
-    [3] Open Modbus/TCP Specification, версия 1.0, 29 марта 1999 г.
+    [4] Open Modbus/TCP Specification, версия 1.0, 29 марта 1999 г.
         Автор: Andy Swales, Schneider Electric
-    [4] Modbus Application Protocol Specification V1.1b3, 26 апреля 2002 г.
+    [5] Modbus Application Protocol Specification V1.1b3, 26 апреля 2002 г.
         Источник: http://www.modbus.org
 
   Внешние программы, использованные для тестирования:
