@@ -1,7 +1,8 @@
 /*
- * Minimal Modbus TCP Slave for HTU21D.
- * Register 0: temperature * 100.
- * Register 1: humidity * 100.
+ * Minimal SCADA Modbus TCP Slave for HTU21D.
+ *
+ * FC04: input register 0 = temperature * 100
+ * FC04: input register 1 = humidity * 100
  */
 
 #include <SPI.h>
@@ -17,11 +18,14 @@ IPAddress ip(192, 168, 1, 100);
 IPAddress gateway(192, 168, 1, 1);
 IPAddress subnet(255, 255, 255, 0);
 
+const word IREG_TEMP_X100 = 0;
+const word IREG_HUM_X100 = 1;
+
 void setup() {
   Ethernet.begin(mac, ip, gateway, subnet);
 
-  Mb.MbData[0] = 0;
-  Mb.MbData[1] = 0;
+  Mb.Ireg(IREG_TEMP_X100, 0);
+  Mb.Ireg(IREG_HUM_X100, 0);
 
   htu.begin();
 }
@@ -30,10 +34,7 @@ void loop() {
   Mb.MbsRun();
 
   if (htu.readTick()) {
-    float temperature = htu.getTemperature();
-    float humidity = htu.getHumidity();
-
-    Mb.MbData[0] = static_cast<int>(temperature * 100);
-    Mb.MbData[1] = static_cast<int>(humidity * 100);
+    Mb.Ireg(IREG_TEMP_X100, (int16_t)(htu.getTemperature() * 100.0f));
+    Mb.Ireg(IREG_HUM_X100, (word)(htu.getHumidity() * 100.0f));
   }
 }

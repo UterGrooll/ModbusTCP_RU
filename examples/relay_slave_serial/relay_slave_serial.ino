@@ -1,7 +1,9 @@
 /*
- * Modbus TCP Slave for relay control with Serial diagnostics.
- * Register 0: relay command.
- * Register 1: actual relay state.
+ * SCADA Modbus TCP Slave for one relay with Serial diagnostics.
+ *
+ * FC01: read coil 0
+ * FC05/FC15: write coil 0
+ * FC04: read input register 0, actual relay state
  */
 
 #include <SPI.h>
@@ -15,14 +17,21 @@ IPAddress ip(192, 168, 1, 100);
 IPAddress gateway(192, 168, 1, 1);
 IPAddress subnet(255, 255, 255, 0);
 
-const int RELAY_PIN = 2;
+const byte RELAY_PIN = 2;
+const word COIL_RELAY = 0;
+const word IREG_RELAY_STATE = 0;
 
-#define RELAY_REGISTER 0
-#define STATUS_REGISTER 1
+void onCoilWrite(word address, bool value) {
+  if (address != COIL_RELAY) {
+    return;
+  }
 
-bool lastRelayState = false;
-unsigned long lastStatusUpdate = 0;
-const unsigned long STATUS_UPDATE_INTERVAL = 1000;
+  digitalWrite(RELAY_PIN, value ? HIGH : LOW);
+  Mb.Ireg(IREG_RELAY_STATE, value ? 1 : 0);
+
+  Serial.print(F("Relay: "));
+  Serial.println(value ? F("ON") : F("OFF"));
+}
 
 void setup() {
   Serial.begin(9600);
@@ -30,37 +39,18 @@ void setup() {
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, LOW);
 
+  Mb.Coil(COIL_RELAY, false);
+  Mb.Ireg(IREG_RELAY_STATE, 0);
+  Mb.onCoilWrite(onCoilWrite);
+
   Ethernet.begin(mac, ip, gateway, subnet);
   delay(1000);
 
-  if (Ethernet.linkStatus() == LinkOFF) {
-    Serial.println("Error: Ethernet link is down");
-    while (1) {
-    }
-  }
-
-  Mb.MbData[RELAY_REGISTER] = 0;
-  Mb.MbData[STATUS_REGISTER] = 0;
-
-  Serial.println("Modbus TCP Slave started");
-  Serial.print("IP: ");
+  Serial.println(F("ModbusTCP_RU SCADA Slave started"));
+  Serial.print(F("IP: "));
   Serial.println(Ethernet.localIP());
-  Serial.println("Register 0 = command, register 1 = status");
 }
 
 void loop() {
   Mb.MbsRun();
-
-  bool currentRelayState = (Mb.MbData[RELAY_REGISTER] == 1);
-  if (currentRelayState != lastRelayState) {
-    digitalWrite(RELAY_PIN, currentRelayState ? HIGH : LOW);
-    lastRelayState = currentRelayState;
-    Serial.print("Relay state changed: ");
-    Serial.println(currentRelayState ? "ON" : "OFF");
-  }
-
-  if (millis() - lastStatusUpdate >= STATUS_UPDATE_INTERVAL) {
-    Mb.MbData[STATUS_REGISTER] = digitalRead(RELAY_PIN) ? 1 : 0;
-    lastStatusUpdate = millis();
-  }
 }

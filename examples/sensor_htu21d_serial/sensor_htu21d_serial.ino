@@ -1,7 +1,8 @@
 /*
- * Modbus TCP Slave for HTU21D with Serial diagnostics.
- * Register 0: temperature * 100.
- * Register 1: humidity * 100.
+ * SCADA Modbus TCP Slave for HTU21D with Serial diagnostics.
+ *
+ * FC04: input register 0 = temperature * 100
+ * FC04: input register 1 = humidity * 100
  */
 
 #include <SPI.h>
@@ -17,32 +18,28 @@ IPAddress ip(192, 168, 1, 100);
 IPAddress gateway(192, 168, 1, 1);
 IPAddress subnet(255, 255, 255, 0);
 
-const long serialPrintInterval = 1000;
-unsigned long lastSerialPrint = 0;
+const word IREG_TEMP_X100 = 0;
+const word IREG_HUM_X100 = 1;
+const unsigned long SERIAL_PERIOD = 1000;
+unsigned long serialTimer = 0;
 
 void setup() {
   Serial.begin(9600);
-  Serial.println("HTU21D + Modbus TCP started");
 
   Ethernet.begin(mac, ip, gateway, subnet);
   delay(1000);
 
-  if (Ethernet.linkStatus() == LinkOFF) {
-    Serial.println("Error: Ethernet link is down");
-    while (true) {
-    }
-  }
+  Mb.Ireg(IREG_TEMP_X100, 0);
+  Mb.Ireg(IREG_HUM_X100, 0);
 
   if (!htu.begin()) {
-    Serial.println("Error: HTU21D not found");
+    Serial.println(F("HTU21D not found"));
     while (true) {
     }
   }
 
-  Mb.MbData[0] = 0;
-  Mb.MbData[1] = 0;
-
-  Serial.print("IP: ");
+  Serial.println(F("ModbusTCP_RU SCADA Slave started"));
+  Serial.print(F("IP: "));
   Serial.println(Ethernet.localIP());
 }
 
@@ -50,22 +47,20 @@ void loop() {
   Mb.MbsRun();
 
   if (htu.readTick()) {
-    float temperature = htu.getTemperature();
-    float humidity = htu.getHumidity();
+    int16_t tempX100 = (int16_t)(htu.getTemperature() * 100.0f);
+    word humX100 = (word)(htu.getHumidity() * 100.0f);
 
-    int tempFixed = static_cast<int>(temperature * 100);
-    int humFixed = static_cast<int>(humidity * 100);
+    Mb.Ireg(IREG_TEMP_X100, tempX100);
+    Mb.Ireg(IREG_HUM_X100, humX100);
 
-    Mb.MbData[0] = tempFixed;
-    Mb.MbData[1] = humFixed;
+    if (millis() - serialTimer >= SERIAL_PERIOD) {
+      serialTimer = millis();
 
-    if (millis() - lastSerialPrint >= serialPrintInterval) {
-      Serial.print("Temperature: ");
-      Serial.print(tempFixed / 100.0, 2);
-      Serial.print(" C | Humidity: ");
-      Serial.print(humFixed / 100.0, 2);
-      Serial.println(" %");
-      lastSerialPrint = millis();
+      Serial.print(F("T="));
+      Serial.print(tempX100 / 100.0f, 2);
+      Serial.print(F(" C, H="));
+      Serial.print(humX100 / 100.0f, 2);
+      Serial.println(F(" %"));
     }
   }
 }

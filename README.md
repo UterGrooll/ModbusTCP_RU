@@ -1,32 +1,54 @@
 # ModbusTCP_RU
 
-`ModbusTCP_RU` — библиотека Arduino для работы по `Modbus TCP` в режимах `Master` и `Slave`.
+`ModbusTCP_RU` — лёгкая библиотека Arduino для работы по `Modbus TCP` в режиме `Slave`.
 
-Библиотека предназначена для плат Arduino с Ethernet-контроллерами `W5100` и `W5500` и подходит как для интеграции со SCADA, так и для прямого обмена между устройствами.
+Библиотека предназначена для простых Arduino-проектов, которые нужно быстро подключить к `SCADA`, `HMI` или другому Modbus TCP клиенту через Ethernet-модуль `W5100` / `W5500`.
+
+Главная идея версии `0.1.4` — не делать тяжёлый универсальный стек, а дать быстрый и предсказуемый Modbus TCP Slave для Arduino I/O модулей.
 
 ## Общая информация
 
-- Версия: `0.1.3`
+- Версия: `0.1.4`
+- Режим работы: `Modbus TCP Slave`
 - Оригинальный автор: Marco Gerritse (2013) https://myarduinoprojects.com/modbus.html
-- Форк и сопровождение: UterGrooll
+- Форк и доработка: UterGrooll
 - Протестировано с: `W5500`
 - Среда разработки: `Arduino IDE 2.3.5`
+
+## Назначение
+
+Библиотека подходит для:
+
+- подключения Arduino к SCADA;
+- простых модулей релейных выходов;
+- модулей дискретных входов;
+- телеметрии;
+- датчиков температуры, влажности, напряжения;
+- небольших Arduino PLC / I/O устройств.
 
 ## Возможности
 
 - Режим `Modbus TCP Slave`
-- Режим `Modbus TCP Master`
-- Общий массив `MbData[]` для регистров и побитового доступа
-- Адресация с нуля
-- Поддержка стандартных функций Modbus:
-  - `1` Read Coils
-  - `2` Read Discrete Inputs
-  - `3` Read Holding Registers
-  - `4` Read Input Registers
-  - `5` Write Single Coil
-  - `6` Write Single Register
-  - `15` Write Multiple Coils
-  - `16` Write Multiple Registers
+- Лёгкий профиль для `AVR` включается автоматически
+- Один SCADA-клиент по умолчанию на UNO / Nano
+- Раздельные области памяти Modbus
+- Поддержка стандартных функций:
+  - `FC01` Read Coils
+  - `FC02` Read Discrete Inputs
+  - `FC03` Read Holding Registers
+  - `FC04` Read Input Registers
+  - `FC05` Write Single Coil
+  - `FC06` Write Single Register
+  - `FC15` Write Multiple Coils
+  - `FC16` Write Multiple Registers
+- Modbus Exception Responses:
+  - `01` Illegal Function
+  - `02` Illegal Data Address
+  - `03` Illegal Data Value
+  - `04` Slave Device Failure
+- Неблокирующая обработка TCP
+- Callback при записи coil / holding register
+- Совместимость со старыми скетчами через `MbData[]`
 
 ## Требования
 
@@ -35,23 +57,47 @@
 - Библиотека `SPI`
 - Библиотека `Ethernet`
 
-Для части примеров также требуется:
+Для части примеров дополнительно требуются:
 
 - `GyverHTU21D`
+- `GyverDS18`
 
 ## Модель данных
 
-Все Modbus-данные хранятся в массиве `MbData[]`.
+В версии `0.1.4` области памяти разделены по Modbus-модели:
 
-- `MB_DATA_LEN = 30`
-- Доступно `30` 16-битных регистров
-- Доступно `30 * 16 = 480` бит
+| Function | Область памяти | API |
+| -------- | -------------- | --- |
+| `FC01` | Coils | `Coil()` |
+| `FC02` | Discrete Inputs | `Discrete()` |
+| `FC03` | Holding Registers | `Hreg()` |
+| `FC04` | Input Registers | `Ireg()` |
+| `FC05` / `FC15` | Coils | `onCoilWrite()` |
+| `FC06` / `FC16` | Holding Registers | `onHoldingWrite()` |
 
-Один и тот же массив используется и для 16-битного доступа, и для побитовой работы.
+По умолчанию для `AVR` используется лёгкая карта:
+
+```cpp
+MB_MAX_COILS     8
+MB_MAX_DISCRETE  8
+MB_MAX_HOLDING   16
+MB_MAX_INPUT     16
+MB_MAX_CLIENTS   1
+MB_BUFFER_SIZE   128
+```
+
+Для более крупных плат размеры можно переопределить до подключения библиотеки:
+
+```cpp
+#define MB_MAX_COILS 32
+#define MB_MAX_DISCRETE 32
+#define MB_MAX_HOLDING 64
+#define MB_MAX_INPUT 64
+
+#include "ModbusTCP_RU.h"
+```
 
 ## Базовое использование
-
-### Slave
 
 ```cpp
 #include <SPI.h>
@@ -65,72 +111,91 @@ IPAddress ip(192, 168, 1, 100);
 IPAddress gateway(192, 168, 1, 1);
 IPAddress subnet(255, 255, 255, 0);
 
+const byte RELAY_PIN = 2;
+
+void onCoilWrite(word address, bool value) {
+  if (address == 0) {
+    digitalWrite(RELAY_PIN, value ? HIGH : LOW);
+  }
+}
+
 void setup() {
+  pinMode(RELAY_PIN, OUTPUT);
+
+  Mb.Coil(0, false);       // FC01 / FC05
+  Mb.Ireg(0, 0);           // FC04
+  Mb.onCoilWrite(onCoilWrite);
+
   Ethernet.begin(mac, ip, gateway, subnet);
-  Mb.MbData[0] = 123;
 }
 
 void loop() {
   Mb.MbsRun();
-}
-```
 
-### Master
-
-```cpp
-#include <SPI.h>
-#include <Ethernet.h>
-#include "ModbusTCP_RU.h"
-
-ModbusTCP_RU Mb;
-
-byte mac[] = {0x90, 0xA5, 0xDA, 0x0E, 0x94, 0xB6};
-IPAddress ip(192, 168, 1, 110);
-IPAddress gateway(192, 168, 1, 1);
-IPAddress subnet(255, 255, 255, 0);
-
-void setup() {
-  Ethernet.begin(mac, ip, gateway, subnet);
-  Mb.remSlaveIP = IPAddress(192, 168, 1, 50);
-}
-
-void loop() {
-  Mb.Req(MB_FC_READ_REGISTERS, 0, 2, 0);
-  Mb.MbmRun();
+  Mb.Ireg(0, analogRead(A0));
 }
 ```
 
 ## Публичный интерфейс
 
-### Доступ к данным
+### Coils
 
-- `word MbData[MB_DATA_LEN]`  
-  Общий массив данных Modbus.
+- `bool Coil(word address) const`
+- `bool Coil(word address, bool value)`
+- `bool CoilRead(word address) const`
+- `bool CoilWrite(word address, bool value)`
 
-- `boolean GetBit(word Number)`  
-  Возвращает значение бита по битовому адресу.
+Используется для реле, выходов и команд от SCADA.
 
-- `boolean SetBit(word Number, boolean Data)`  
-  Записывает значение бита по битовому адресу.
+### Discrete Inputs
 
-- `word GetDataLen()`  
-  Возвращает длину массива регистров.
+- `bool Discrete(word address) const`
+- `bool Discrete(word address, bool value)`
+- `bool DiscreteRead(word address) const`
+- `bool DiscreteWrite(word address, bool value)`
 
-### Методы Master
+Используется для кнопок, концевиков и дискретных входов.
 
-- `void Req(MB_FC FC, word Ref, word Count, word Pos)`  
-  Формирует и отправляет Modbus TCP-запрос.
+### Holding Registers
 
-- `void MbmRun()`  
-  Принимает и обрабатывает ответ в режиме master.
+- `word Hreg(word address) const`
+- `bool Hreg(word address, word value)`
 
-- `IPAddress remSlaveIP`  
-  IP-адрес удалённого slave-устройства.
+Используется для настроек, уставок и значений, которые SCADA может записывать.
 
-### Методы Slave
+### Input Registers
 
-- `void MbsRun()`  
-  Обрабатывает входящие Modbus TCP-запросы.
+- `word Ireg(word address) const`
+- `bool Ireg(word address, word value)`
+
+Используется для телеметрии: температура, напряжение, ток, счётчики.
+
+### Callbacks
+
+```cpp
+void onCoilWrite(word address, bool value) {
+  if (address == 0) {
+    digitalWrite(2, value ? HIGH : LOW);
+  }
+}
+
+Mb.onCoilWrite(onCoilWrite);
+```
+
+Callback общий для всей области. Адрес передаётся в обработчик.
+
+### Совместимость
+
+`MbData[]` оставлен для старых скетчей.
+
+Теперь `MbData[]` — это alias на `Holding Registers`.
+
+Новые проекты лучше писать через:
+
+- `Coil()`
+- `Discrete()`
+- `Hreg()`
+- `Ireg()`
 
 ## Примеры
 
@@ -139,31 +204,18 @@ void loop() {
 ### Relay Slave
 
 - [`examples/relay_slave_lite/relay_slave_lite.ino`](examples/relay_slave_lite/relay_slave_lite.ino)  
-  Минимальный пример управления реле.  
-  Регистр `0`: команда на реле (`0` = выкл., `1` = вкл.).
+  Минимальный пример управления реле через `Coil 0`.
 
 - [`examples/relay_slave_serial/relay_slave_serial.ino`](examples/relay_slave_serial/relay_slave_serial.ino)  
-  Управление реле с диагностикой через `Serial`.  
-  Регистр `0`: команда на реле.  
-  Регистр `1`: фактическое состояние реле.
+  Управление реле с диагностикой через `Serial`.
 
-### HTU21D Sensor Slave
+### Sensor Slave
 
 - [`examples/sensor_htu21d_lite/sensor_htu21d_lite.ino`](examples/sensor_htu21d_lite/sensor_htu21d_lite.ino)  
-  Минимальный Modbus TCP slave для `HTU21D`.  
-  Регистр `0`: температура `* 100`.  
-  Регистр `1`: влажность `* 100`.
+  Минимальный Modbus TCP Slave для `HTU21D`.
 
 - [`examples/sensor_htu21d_serial/sensor_htu21d_serial.ino`](examples/sensor_htu21d_serial/sensor_htu21d_serial.ino)  
-  `HTU21D` slave с выводом значений в `Serial`.  
-  Регистр `0`: температура `* 100`.  
-  Регистр `1`: влажность `* 100`.
-
-### Прямой обмен Master-Slave
-
-- [`examples/master_read_slave/master_read_slave.ino`](examples/master_read_slave/master_read_slave.ino)  
-  Прямой обмен без SCADA.  
-  Пример работает как `Master` и читает два holding-регистра у удалённого `Slave`.
+  `HTU21D` с выводом значений в `Serial`.
 
 ## Сетевая конфигурация
 
@@ -174,41 +226,49 @@ void loop() {
 - `gateway`
 - `subnet`
 
-В режиме master адрес удалённого устройства задаётся через:
-
-- `Mb.remSlaveIP`
-
-Все устройства в одной сети должны иметь уникальные IP-адреса и MAC-адреса.
+SCADA подключается к Arduino по IP-адресу платы и порту `502`.
 
 ## Особенности текущей реализации
 
-- В режиме slave TCP-сервер запускается при первом вызове `MbsRun()`.
-- В режиме master для подключения используется `remSlaveIP`.
-- Для `MbData[]` и битового доступа добавены проверки границ.
-- Размер буфера запросов и ответов задаётся через `MB_BUFFER_SIZE = 260`.
+- Библиотека ориентирована на `Slave` для SCADA.
+- На `AVR` автоматически включается лёгкий профиль.
+- Master-код на `AVR` не компилируется по умолчанию.
+- Для UNO / Nano по умолчанию используется один TCP-клиент.
+- TCP-сервер запускается при первом вызове `MbsRun()`.
+- Адресация Modbus начинается с `0`.
+- Размер карты памяти задаётся через `define`.
 
-## Изменения в 0.1.3
+## Изменения в 0.1.4
 
-- Исправлены критичные проверки границ для регистров и битов.
-- Убран жёстко заданный IP-адрес master-устройства.
-- Master теперь использует `remSlaveIP`.
-- Автоматизирован запуск TCP-сервера в режиме slave.
-- Улучшена обработка буферов запросов и ответов.
-- Обновлены примеры в соответствии с текущим поведением библиотеки.
-- Добавлен пример прямого обмена `Master -> Slave` без SCADA.
+- Библиотека переведена в философию лёгкого `Modbus TCP Slave` для SCADA.
+- Для `AVR` автоматически включается малый профиль памяти.
+- Уменьшено потребление SRAM на UNO / Nano.
+- Добавлены раздельные области памяти:
+  - coils;
+  - discrete inputs;
+  - holding registers;
+  - input registers.
+- Обновлены обработчики `FC01`–`FC16`.
+- Добавлены стандартные Modbus exception responses.
+- Добавлен callback при записи coil / holding register.
+- Обновлены примеры под SCADA Slave.
+- Пример Master-Slave заменён на пример карты памяти SCADA.
 
 ## История версий
 
-- `0.1.3`  
+- `0.1.4`
+  Лёгкий Modbus TCP Slave для Arduino + SCADA, раздельная карта памяти, малый профиль для AVR.
+
+- `0.1.3`
   Исправления стабильности master/slave-обмена, проверки границ и обновление примеров.
 
-- `0.1.2`  
+- `0.1.2`
   Крупная переработка библиотеки, улучшение производительности и читаемости.
 
-- `0.1.1`  
+- `0.1.1`
   Исправление ошибок.
 
-- `0.1.0`  
+- `0.1.0`
   Первая версия.
 
 ## Дополнительные файлы
