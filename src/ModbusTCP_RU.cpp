@@ -271,6 +271,27 @@ void ModbusTCP_RU::MbsRun()
   serverProcess();
 }
 
+void ModbusTCP_RU::begin()
+{
+  MbServer.begin();
+  MbsServerStarted = true;
+#ifdef MB_DEBUG
+  Serial.println(F("MB server begin"));
+#endif
+}
+
+void ModbusTCP_RU::restart()
+{
+  for (byte slot = 0; slot < MB_MAX_CLIENTS; slot++) {
+    clearServerClient(slot);
+  }
+  MbServer.begin();
+  MbsServerStarted = true;
+#ifdef MB_DEBUG
+  Serial.println(F("MB server restart"));
+#endif
+}
+
 void ModbusTCP_RU::serverProcess()
 {
   if (!MbsServerStarted) {
@@ -333,7 +354,7 @@ void ModbusTCP_RU::processServerClient(byte slot)
     return;
   }
 
-  if (state.length == 0 && (now - state.lastActivity) > MB_IDLE_TIMEOUT) {
+  if (MB_IDLE_TIMEOUT > 0 && state.length == 0 && (now - state.lastActivity) > MB_IDLE_TIMEOUT) {
     clearServerClient(slot);
     return;
   }
