@@ -1,6 +1,6 @@
 /*
   ModbusTCP_RU.h - Arduino Modbus TCP Master/Slave library.
-  Version: V-0.1.4
+  Version: V-0.2.0
 */
 
 #ifndef ModbusTCP_RU_h
@@ -14,7 +14,14 @@
 #define MB_PORT 502
 #define MB_TIMEOUT 1000
 #define MB_PACKET_TIMEOUT 50
-#define MB_IDLE_TIMEOUT 30000UL
+
+// Закрывать "тихий" клиентский сокет после простоя. На медленной/многоустройственной
+// линии Rapid SCADA опрос одного устройства может приходить реже — иначе библиотека
+// сама рвёт живое соединение. Переопредели своим #define до include.
+// 0 = таймаут простоя отключён.
+#ifndef MB_IDLE_TIMEOUT
+  #define MB_IDLE_TIMEOUT 60000UL
+#endif
 
 #if defined(ARDUINO_ARCH_AVR) && !defined(MB_SMALL_MEMORY)
   #define MB_SMALL_MEMORY
@@ -156,6 +163,13 @@ public:
   void MbsRun();
   void serverProcess();
   word GetDataLen();
+
+  // Управление сервером без обращения к глобальному EthernetServer из скетча.
+  // begin()   — поднять слушающий сокет (идемпотентно).
+  // restart() — закрыть все клиентские слоты и заново поднять сервер; вызывать
+  //             после Ethernet.begin() в watchdog'е, чтобы не оставлять "мусорные" слоты.
+  void begin();
+  void restart();
 
   uint32_t ReadUInt32(word address, MB_WORD_ORDER order = MB_WORD_ORDER_NORMAL) const;
   int32_t ReadInt32(word address, MB_WORD_ORDER order = MB_WORD_ORDER_NORMAL) const;
