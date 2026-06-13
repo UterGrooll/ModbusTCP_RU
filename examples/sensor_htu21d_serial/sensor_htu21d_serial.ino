@@ -27,6 +27,7 @@ void setup() {
   Serial.begin(9600);
 
   Ethernet.begin(mac, ip, gateway, subnet);
+  Mb.begin();
   delay(1000);
 
   Mb.Ireg(IREG_TEMP_X100, 0);

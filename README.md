@@ -235,6 +235,9 @@ void restartEthernet() {
 - [`examples/relay_slave_serial/relay_slave_serial.ino`](examples/relay_slave_serial/relay_slave_serial.ino)  
   Управление реле с диагностикой через `Serial`.
 
+- [`examples/relay_slave_watchdog/relay_slave_watchdog.ino`](examples/relay_slave_watchdog/relay_slave_watchdog.ino)  
+  Реле + Ethernet link watchdog с `Mb.restart()` — рекомендуемая схема устойчивости к пропаданию линка (W5500).
+
 ### Sensor Slave
 
 - [`examples/sensor_htu21d_lite/sensor_htu21d_lite.ino`](examples/sensor_htu21d_lite/sensor_htu21d_lite.ino)  

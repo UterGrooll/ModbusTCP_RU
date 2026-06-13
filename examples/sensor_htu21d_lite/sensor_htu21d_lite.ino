@@ -23,6 +23,7 @@ const word IREG_HUM_X100 = 1;
 
 void setup() {
   Ethernet.begin(mac, ip, gateway, subnet);
+  Mb.begin();
 
   Mb.Ireg(IREG_TEMP_X100, 0);
   Mb.Ireg(IREG_HUM_X100, 0);

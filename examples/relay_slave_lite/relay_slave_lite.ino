@@ -33,6 +33,7 @@ void setup() {
   Mb.onCoilWrite(onCoilWrite);
 
   Ethernet.begin(mac, ip, gateway, subnet);
+  Mb.begin();   // явный старт сервера (MbsRun() стартует его и лениво)
 }
 
 void loop() {
