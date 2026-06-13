@@ -44,6 +44,7 @@ void setup() {
   Mb.onCoilWrite(onCoilWrite);
 
   Ethernet.begin(mac, ip, gateway, subnet);
+  Mb.begin();
   delay(1000);
 
   Serial.println(F("ModbusTCP_RU SCADA Slave started"));
