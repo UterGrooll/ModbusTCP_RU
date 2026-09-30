@@ -14,6 +14,7 @@ ModbusTCP_RU Mb;
 byte mac[] = {0x90, 0xA2, 0xDA, 0x0D, 0x3F, 0xCD};
 IPAddress ip(192, 168, 1, 100);
 IPAddress gateway(192, 168, 1, 1);
+IPAddress dnsServer(192, 168, 1, 1);
 IPAddress subnet(255, 255, 255, 0);
 
 const byte RELAY_PIN = 2;
@@ -32,7 +33,7 @@ void setup() {
   Mb.Coil(COIL_RELAY, false);
   Mb.onCoilWrite(onCoilWrite);
 
-  Ethernet.begin(mac, ip, gateway, subnet);
+  Ethernet.begin(mac, ip, dnsServer, gateway, subnet);
   Mb.begin();   // явный старт сервера (MbsRun() стартует его и лениво)
 }
 

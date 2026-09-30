@@ -1,6 +1,6 @@
 /*
-  ModbusTCP_RU.h - Arduino Modbus TCP Master/Slave library.
-  Version: V-0.2.0
+  ModbusTCP_RU.h - Arduino Modbus TCP Slave library.
+  Version: V-0.3.0
 */
 
 #ifndef ModbusTCP_RU_h
@@ -11,77 +11,16 @@
 #include <Ethernet.h>
 #include <string.h>
 
-#define MB_PORT 502
-#define MB_TIMEOUT 1000
-#define MB_PACKET_TIMEOUT 50
-
-// Закрывать "тихий" клиентский сокет после простоя. На медленной/многоустройственной
-// линии Rapid SCADA опрос одного устройства может приходить реже — иначе библиотека
-// сама рвёт живое соединение. Переопредели своим #define до include.
-// 0 = таймаут простоя отключён.
-#ifndef MB_IDLE_TIMEOUT
-  #define MB_IDLE_TIMEOUT 60000UL
+#ifndef MAX_SOCK_NUM
+#error "Use Arduino Ethernet >= 2.0.2 for W5100/W5500, not EthernetENC."
 #endif
 
-#if defined(ARDUINO_ARCH_AVR) && !defined(MB_SMALL_MEMORY)
-  #define MB_SMALL_MEMORY
-#endif
-
-#if defined(ARDUINO_ARCH_AVR) && !defined(MB_ENABLE_MASTER) && !defined(MB_SLAVE_ONLY)
-  #define MB_SLAVE_ONLY
-#endif
-
-#ifdef MB_SMALL_MEMORY
-  #ifndef MB_MAX_COILS
-    #define MB_MAX_COILS 8
-  #endif
-  #ifndef MB_MAX_DISCRETE
-    #define MB_MAX_DISCRETE 8
-  #endif
-  #ifndef MB_MAX_HOLDING
-    #define MB_MAX_HOLDING 16
-  #endif
-  #ifndef MB_MAX_INPUT
-    #define MB_MAX_INPUT 16
-  #endif
-  #ifndef MB_MAX_CLIENTS
-    #define MB_MAX_CLIENTS 2
-  #endif
-#else
-  #ifndef MB_MAX_COILS
-    #define MB_MAX_COILS 128
-  #endif
-  #ifndef MB_MAX_DISCRETE
-    #define MB_MAX_DISCRETE 128
-  #endif
-  #ifndef MB_MAX_HOLDING
-    #define MB_MAX_HOLDING 128
-  #endif
-  #ifndef MB_MAX_INPUT
-    #define MB_MAX_INPUT 128
-  #endif
-  #ifndef MB_MAX_CLIENTS
-    #define MB_MAX_CLIENTS 4
-  #endif
-#endif
-
-#ifndef MB_BUFFER_SIZE
-  #ifdef MB_SMALL_MEMORY
-    #define MB_BUFFER_SIZE 128
-  #else
-    #define MB_BUFFER_SIZE 260
-  #endif
-#endif
-
-#ifndef MB_DATA_LEN
-  #define MB_DATA_LEN MB_MAX_HOLDING
-#endif
+#include "ModbusTCP_RU_config.h"
 
 #define MB_PROTOCOL_MAX_READ_BITS 2000
 #define MB_PROTOCOL_MAX_READ_REGISTERS 125
 #define MB_PROTOCOL_MAX_WRITE_COILS 1968
 #define MB_PROTOCOL_MAX_WRITE_REGISTERS 123
-#define MB_MAX_BYTES_PER_POLL 32
 
 enum MB_FC {
   MB_FC_NONE                     = 0,
@@ -113,15 +52,49 @@ typedef void (*ModbusHoldingWriteCallback)(word address, word value);
 struct ModbusStats {
   unsigned long rxPackets;
   unsigned long txPackets;
-  unsigned long crcErrors;
+  unsigned long crcErrors; // Legacy field: always zero for Modbus TCP.
   unsigned long exceptionCount;
   unsigned long socketErrors;
+  unsigned long malformedFrames;
+  unsigned long timeouts;
+  unsigned long rejectedClients;
 };
+
+template<unsigned C, unsigned D, unsigned H, unsigned I, unsigned N, unsigned B>
+struct ModbusConfigTag {};
+
+typedef ModbusConfigTag<MB_MAX_COILS, MB_MAX_DISCRETE, MB_MAX_HOLDING,
+                        MB_MAX_INPUT, MB_MAX_CLIENTS, MB_BUFFER_SIZE> ModbusBuildConfig;
+
+static_assert(MB_MAX_COILS > 0 && MB_MAX_COILS <= 65535UL, "Invalid coil map");
+static_assert(MB_MAX_DISCRETE > 0 && MB_MAX_DISCRETE <= 65535UL, "Invalid discrete map");
+static_assert(MB_MAX_HOLDING > 0 && MB_MAX_HOLDING <= 65535UL, "Invalid holding map");
+static_assert(MB_MAX_INPUT > 0 && MB_MAX_INPUT <= 65535UL, "Invalid input map");
+static_assert(MB_MAX_CLIENTS > 0 && MB_MAX_CLIENTS < MAX_SOCK_NUM, "Reserve one Ethernet socket for listening");
+static_assert(MB_BUFFER_SIZE >= 13 && MB_BUFFER_SIZE <= 260, "Invalid TCP ADU buffer size");
+static_assert(MB_MAX_BYTES_PER_POLL > 0 && MB_MAX_BYTES_PER_POLL <= 260, "Invalid polling budget");
+static_assert(MB_FRAME_TIMEOUT > 0, "A complete-frame deadline is required");
+static_assert(9UL + 2UL * (MB_MAX_HOLDING < 125 ? MB_MAX_HOLDING : 125) <= MB_BUFFER_SIZE,
+              "Holding read response does not fit MB_BUFFER_SIZE");
+static_assert(13UL + 2UL * (MB_MAX_HOLDING < 123 ? MB_MAX_HOLDING : 123) <= MB_BUFFER_SIZE,
+              "Holding write request does not fit MB_BUFFER_SIZE");
+static_assert(9UL + 2UL * (MB_MAX_INPUT < 125 ? MB_MAX_INPUT : 125) <= MB_BUFFER_SIZE,
+              "Input read response does not fit MB_BUFFER_SIZE");
+static_assert(9UL + ((MB_MAX_COILS < 2000 ? MB_MAX_COILS : 2000) + 7UL) / 8 <= MB_BUFFER_SIZE,
+              "Coil read response does not fit MB_BUFFER_SIZE");
+static_assert(13UL + ((MB_MAX_COILS < 1968 ? MB_MAX_COILS : 1968) + 7UL) / 8 <= MB_BUFFER_SIZE,
+              "Coil write request does not fit MB_BUFFER_SIZE");
+static_assert(9UL + ((MB_MAX_DISCRETE < 2000 ? MB_MAX_DISCRETE : 2000) + 7UL) / 8 <= MB_BUFFER_SIZE,
+              "Discrete read response does not fit MB_BUFFER_SIZE");
+static_assert(sizeof(float) == 4, "Float helpers require 32-bit float");
 
 class ModbusTCP_RU
 {
 public:
-  ModbusTCP_RU();
+  // The tag makes inconsistent array sizes across compilation units a link error.
+  explicit ModbusTCP_RU(ModbusBuildConfig *config = 0);
+  ModbusTCP_RU(const ModbusTCP_RU&) = delete;
+  ModbusTCP_RU& operator=(const ModbusTCP_RU&) = delete;
 
   bool MbCoils[MB_MAX_COILS];
   bool MbDiscreteInputs[MB_MAX_DISCRETE];
@@ -148,28 +121,24 @@ public:
   boolean GetBit(word Number);
   boolean SetBit(word Number, boolean Data);
 
-  void onCoilWrite(word address, ModbusCoilWriteCallback callback);
-  void onHoldingWrite(word address, ModbusHoldingWriteCallback callback);
+  // Use the common callback and dispatch on its address argument.
+  void onCoilWrite(word address, ModbusCoilWriteCallback callback) = delete;
+  void onHoldingWrite(word address, ModbusHoldingWriteCallback callback) = delete;
   void onCoilWrite(ModbusCoilWriteCallback callback);
   void onHoldingWrite(ModbusHoldingWriteCallback callback);
-
-#ifndef MB_SLAVE_ONLY
-  void Req(MB_FC FC, word Ref, word Count, word Pos);
-  void MbmRun();
-  void clientProcess();
-  IPAddress remSlaveIP;
-#endif
 
   void MbsRun();
   void serverProcess();
   word GetDataLen();
 
-  // Управление сервером без обращения к глобальному EthernetServer из скетча.
-  // begin()   — поднять слушающий сокет (идемпотентно).
-  // restart() — закрыть все клиентские слоты и заново поднять сервер; вызывать
-  //             после Ethernet.begin() в watchdog'е, чтобы не оставлять "мусорные" слоты.
-  void begin();
-  void restart();
+  // restart() clears connections but reuses an existing listener. Does not reset Ethernet.
+  bool begin();
+  bool restart();
+  void setIdleTimeout(uint32_t milliseconds);
+  void setPacketTimeout(uint32_t milliseconds);
+  void setResponseTimeout(uint32_t milliseconds);
+  bool setCoilLocal(word address, bool value);
+  bool setHoldingLocal(word address, word value);
 
   uint32_t ReadUInt32(word address, MB_WORD_ORDER order = MB_WORD_ORDER_NORMAL) const;
   int32_t ReadInt32(word address, MB_WORD_ORDER order = MB_WORD_ORDER_NORMAL) const;
@@ -188,14 +157,15 @@ private:
     EthernetClient client;
     uint8_t buffer[MB_BUFFER_SIZE];
     uint16_t length;
-    int16_t expectedLength;
+    uint16_t expectedLength;
+    bool responsePending;
+    uint32_t frameStarted;
     unsigned long lastActivity;
   };
 
-  MB_FC SetFC(int fc);
-  bool IsValidRegister(word index);
-  bool IsValidBit(word index);
-  bool isRangeValid(word start, word count, word limit);
+  void notifyCoil(word address, bool value);
+  void notifyHolding(word address, word value);
+  static bool isRangeValid(word start, word count, word limit);
   bool isValidReadCount(MB_FC fc, word count);
   bool isValidWriteCount(MB_FC fc, word count);
 
@@ -203,27 +173,18 @@ private:
   void acceptServerClient();
   void processServerClient(byte slot);
   void processRequest(ServerClientState &state);
-  void sendException(EthernetClient &client, uint8_t *request, byte exceptionCode);
-  void sendResponse(EthernetClient &client, uint8_t *response, uint16_t length);
+  void sendException(ServerClientState &state, byte exceptionCode);
+  void sendResponse(ServerClientState &state, uint16_t length);
+  void transmitResponse(byte slot);
   void debugRequest(const char *prefix, byte fc, word address, word count);
   void debugException(byte fc, byte exceptionCode);
 
-#ifndef MB_SLAVE_ONLY
-  uint8_t MbmByteArray[MB_BUFFER_SIZE];
-  MB_FC MbmFC;
-  int MbmCounter;
-  int MbmExpectedLength;
-  unsigned long MbmLastActivity;
-  uint16_t MbmTransactionId;
-  uint16_t MbmPendingTransactionId;
-  void MbmProcess();
-  word MbmPos;
-  word MbmBitCount;
-#endif
-
   ServerClientState serverClients[MB_MAX_CLIENTS];
-  MB_FC MbsFC;
-  bool MbsServerStarted;
+  uint32_t idleTimeout;
+  uint32_t packetTimeout;
+  uint32_t responseTimeout;
+  bool notifyingCoil;
+  bool notifyingHolding;
 
   ModbusCoilWriteCallback coilWriteCallback;
   ModbusHoldingWriteCallback holdingWriteCallback;

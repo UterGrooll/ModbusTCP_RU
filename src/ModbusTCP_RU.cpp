@@ -1,391 +1,161 @@
 #include "ModbusTCP_RU.h"
 
+// One Modbus server per Ethernet interface. Retained for link compatibility only.
 EthernetServer MbServer(MB_PORT);
-#ifndef MB_SLAVE_ONLY
-EthernetClient MbmClient;
-#endif
 
 static word mbWord(byte high, byte low)
 {
   return ((word)high << 8) | low;
 }
 
-ModbusTCP_RU::ModbusTCP_RU()
+ModbusTCP_RU::ModbusTCP_RU(ModbusBuildConfig *)
   : MbData(MbHoldingRegisters),
-#ifndef MB_SLAVE_ONLY
-    remSlaveIP(0, 0, 0, 0),
-    MbmFC(MB_FC_NONE),
-    MbmCounter(0),
-    MbmExpectedLength(-1),
-    MbmLastActivity(0),
-    MbmTransactionId(0),
-    MbmPendingTransactionId(0),
-    MbmPos(0),
-    MbmBitCount(0),
-#endif
-    MbsFC(MB_FC_NONE),
-    MbsServerStarted(false)
+    idleTimeout(MB_IDLE_TIMEOUT), packetTimeout(MB_PACKET_TIMEOUT),
+    responseTimeout(MB_TX_TIMEOUT), notifyingCoil(false), notifyingHolding(false),
+    coilWriteCallback(0), holdingWriteCallback(0)
 {
   memset(MbCoils, 0, sizeof(MbCoils));
   memset(MbDiscreteInputs, 0, sizeof(MbDiscreteInputs));
   memset(MbHoldingRegisters, 0, sizeof(MbHoldingRegisters));
   memset(MbInputRegisters, 0, sizeof(MbInputRegisters));
-  coilWriteCallback = 0;
-  holdingWriteCallback = 0;
   resetStats();
-
-  for (byte i = 0; i < MB_MAX_CLIENTS; i++) {
-    serverClients[i].length = 0;
-    serverClients[i].expectedLength = -1;
-    serverClients[i].lastActivity = 0;
+  for (byte slot = 0; slot < MB_MAX_CLIENTS; ++slot) {
+    serverClients[slot].length = 0;
+    serverClients[slot].expectedLength = 0;
+    serverClients[slot].responsePending = false;
+    serverClients[slot].frameStarted = 0;
+    serverClients[slot].lastActivity = 0;
   }
 }
 
-#ifndef MB_SLAVE_ONLY
-void ModbusTCP_RU::Req(MB_FC FC, word Ref, word Count, word Pos)
+bool ModbusTCP_RU::begin()
 {
-  if (remSlaveIP == IPAddress(0, 0, 0, 0)) {
-    return;
-  }
-
-  if (MbmClient.connected()) {
-    return;
-  }
-
-  MbmFC = FC;
-  MbmPendingTransactionId = ++MbmTransactionId;
-
-  MbmByteArray[0] = highByte(MbmPendingTransactionId);
-  MbmByteArray[1] = lowByte(MbmPendingTransactionId);
-  MbmByteArray[2] = 0;
-  MbmByteArray[3] = 0;
-  MbmByteArray[4] = 0;
-  MbmByteArray[5] = 6;
-  MbmByteArray[6] = 1;
-  MbmByteArray[7] = FC;
-  MbmByteArray[8] = highByte(Ref);
-  MbmByteArray[9] = lowByte(Ref);
-
-  if (FC == MB_FC_READ_COILS || FC == MB_FC_READ_DISCRETE_INPUT) {
-    if (Count < 1) { Count = 1; }
-    if (Count > MB_PROTOCOL_MAX_READ_BITS) { Count = MB_PROTOCOL_MAX_READ_BITS; }
-    MbmByteArray[10] = highByte(Count);
-    MbmByteArray[11] = lowByte(Count);
-  }
-
-  if (FC == MB_FC_READ_REGISTERS || FC == MB_FC_READ_INPUT_REGISTER) {
-    if (Count < 1) { Count = 1; }
-    if (Count > MB_PROTOCOL_MAX_READ_REGISTERS) { Count = MB_PROTOCOL_MAX_READ_REGISTERS; }
-    MbmByteArray[10] = highByte(Count);
-    MbmByteArray[11] = lowByte(Count);
-  }
-
-  if (FC == MB_FC_WRITE_COIL) {
-    MbmByteArray[10] = CoilRead(Pos) ? 0xFF : 0x00;
-    MbmByteArray[11] = 0;
-  }
-
-  if (FC == MB_FC_WRITE_REGISTER) {
-    if (!IsValidRegister(Pos)) {
-      return;
-    }
-    MbmByteArray[10] = highByte(MbHoldingRegisters[Pos]);
-    MbmByteArray[11] = lowByte(MbHoldingRegisters[Pos]);
-  }
-
-  if (FC == MB_FC_WRITE_MULTIPLE_COILS) {
-    if (Count < 1) { Count = 1; }
-    if (Count > MB_PROTOCOL_MAX_WRITE_COILS) { Count = MB_PROTOCOL_MAX_WRITE_COILS; }
-
-    byte byteCount = (Count + 7) / 8;
-    if ((13 + byteCount) > MB_BUFFER_SIZE) {
-      return;
-    }
-
-    MbmByteArray[10] = highByte(Count);
-    MbmByteArray[11] = lowByte(Count);
-    MbmByteArray[12] = byteCount;
-    MbmByteArray[4] = highByte(byteCount + 7);
-    MbmByteArray[5] = lowByte(byteCount + 7);
-
-    for (int i = 0; i < byteCount; i++) {
-      MbmByteArray[13 + i] = 0;
-    }
-
-    for (word i = 0; i < Count; i++) {
-      bitWrite(MbmByteArray[13 + (i / 8)], i % 8, CoilRead(Pos + i));
-    }
-  }
-
-  if (FC == MB_FC_WRITE_MULTIPLE_REGISTERS) {
-    if (Count < 1) { Count = 1; }
-    if (Count > MB_PROTOCOL_MAX_WRITE_REGISTERS) { Count = MB_PROTOCOL_MAX_WRITE_REGISTERS; }
-
-    word byteCount = Count * 2;
-    if ((13 + byteCount) > MB_BUFFER_SIZE) {
-      return;
-    }
-
-    MbmByteArray[10] = highByte(Count);
-    MbmByteArray[11] = lowByte(Count);
-    MbmByteArray[12] = byteCount;
-    MbmByteArray[4] = highByte(byteCount + 7);
-    MbmByteArray[5] = lowByte(byteCount + 7);
-
-    for (word i = 0; i < Count; i++) {
-      if (!IsValidRegister(Pos + i)) {
-        return;
-      }
-      MbmByteArray[(i * 2) + 13] = highByte(MbHoldingRegisters[Pos + i]);
-      MbmByteArray[(i * 2) + 14] = lowByte(MbHoldingRegisters[Pos + i]);
-    }
-  }
-
-  if (MbmClient.connect(remSlaveIP, MB_PORT)) {
-#ifdef MB_DEBUG
-    Serial.println(F("MB master connected"));
-#endif
-    uint16_t messageLength = mbWord(MbmByteArray[4], MbmByteArray[5]) + 6;
-    MbmClient.write(MbmByteArray, messageLength);
-    modbusStats.txPackets++;
-    MbmCounter = 0;
-    MbmExpectedLength = -1;
-    MbmLastActivity = millis();
-    MbmPos = Pos;
-    MbmBitCount = Count;
-  } else {
-    MbmClient.stop();
-    modbusStats.socketErrors++;
-  }
+  if (notifyingCoil || notifyingHolding) return false;
+  if (!MbServer) MbServer.begin();
+  return (bool)MbServer;
 }
 
-void ModbusTCP_RU::MbmRun()
+bool ModbusTCP_RU::restart()
 {
-  clientProcess();
+  if (notifyingCoil || notifyingHolding) return false;
+  for (byte slot = 0; slot < MB_MAX_CLIENTS; ++slot) clearServerClient(slot);
+  // Drain unclaimed connections too. accept() retains/recreates a single listener.
+  for (byte i = 0; i < MAX_SOCK_NUM; ++i) {
+    EthernetClient client = MbServer.accept();
+    if (!client) break;
+    client.setConnectionTimeout(0);
+    client.stop();
+  }
+  return begin();
 }
 
-void ModbusTCP_RU::clientProcess()
-{
-  if (!MbmClient.connected() && !MbmClient.available()) {
-    MbmClient.stop();
-    MbmCounter = 0;
-    MbmExpectedLength = -1;
-    return;
-  }
+void ModbusTCP_RU::setIdleTimeout(uint32_t milliseconds) { idleTimeout = milliseconds; }
+void ModbusTCP_RU::setPacketTimeout(uint32_t milliseconds) { packetTimeout = milliseconds; }
+void ModbusTCP_RU::setResponseTimeout(uint32_t milliseconds) { responseTimeout = milliseconds; }
 
-  unsigned long now = millis();
-  if (MbmCounter > 0 && (now - MbmLastActivity) > MB_TIMEOUT) {
-    MbmClient.stop();
-    MbmCounter = 0;
-    MbmExpectedLength = -1;
-    modbusStats.socketErrors++;
-    return;
-  }
-
-  byte reads = 0;
-  while (MbmClient.available() && reads < MB_MAX_BYTES_PER_POLL) {
-    if (MbmCounter >= MB_BUFFER_SIZE) {
-      MbmClient.stop();
-      MbmCounter = 0;
-      MbmExpectedLength = -1;
-      modbusStats.socketErrors++;
-      return;
-    }
-
-    MbmByteArray[MbmCounter++] = MbmClient.read();
-    reads++;
-    MbmLastActivity = now;
-
-    if (MbmCounter >= 6 && MbmExpectedLength < 0) {
-      MbmExpectedLength = mbWord(MbmByteArray[4], MbmByteArray[5]) + 6;
-      if (MbmExpectedLength < 9 || MbmExpectedLength > MB_BUFFER_SIZE) {
-        MbmClient.stop();
-        MbmCounter = 0;
-        MbmExpectedLength = -1;
-        modbusStats.socketErrors++;
-        return;
-      }
-    }
-
-    if (MbmExpectedLength > 0 && MbmCounter >= MbmExpectedLength) {
-      modbusStats.rxPackets++;
-      MbmProcess();
-      MbmClient.stop();
-      MbmCounter = 0;
-      MbmExpectedLength = -1;
-      return;
-    }
-  }
-}
-
-void ModbusTCP_RU::MbmProcess()
-{
-  uint16_t transactionId = mbWord(MbmByteArray[0], MbmByteArray[1]);
-  if (transactionId != MbmPendingTransactionId) {
-    modbusStats.socketErrors++;
-    return;
-  }
-
-  byte responseFc = MbmByteArray[7];
-  if (responseFc & 0x80) {
-    modbusStats.exceptionCount++;
-    return;
-  }
-
-  MB_FC responseFunction = SetFC(responseFc);
-
-  if (responseFunction == MB_FC_READ_COILS || responseFunction == MB_FC_READ_DISCRETE_INPUT) {
-    word Count = MbmByteArray[8] * 8;
-    if (MbmBitCount < Count) {
-      Count = MbmBitCount;
-    }
-
-    for (word i = 0; i < Count; i++) {
-      bool value = bitRead(MbmByteArray[(i / 8) + 9], i % 8);
-      if (responseFunction == MB_FC_READ_COILS) {
-        CoilWrite(i + MbmPos, value);
-      } else {
-        DiscreteWrite(i + MbmPos, value);
-      }
-    }
-  }
-
-  if (responseFunction == MB_FC_READ_REGISTERS || responseFunction == MB_FC_READ_INPUT_REGISTER) {
-    word Pos = MbmPos;
-
-    for (int i = 0; i < MbmByteArray[8]; i += 2) {
-      word value = mbWord(MbmByteArray[i + 9], MbmByteArray[i + 10]);
-      if (responseFunction == MB_FC_READ_REGISTERS) {
-        Hreg(Pos, value);
-      } else {
-        Ireg(Pos, value);
-      }
-      Pos++;
-    }
-  }
-}
-#endif
-
-void ModbusTCP_RU::MbsRun()
-{
-  serverProcess();
-}
-
-void ModbusTCP_RU::begin()
-{
-  MbServer.begin();
-  MbsServerStarted = true;
-#ifdef MB_DEBUG
-  Serial.println(F("MB server begin"));
-#endif
-}
-
-void ModbusTCP_RU::restart()
-{
-  for (byte slot = 0; slot < MB_MAX_CLIENTS; slot++) {
-    clearServerClient(slot);
-  }
-  MbServer.begin();
-  MbsServerStarted = true;
-#ifdef MB_DEBUG
-  Serial.println(F("MB server restart"));
-#endif
-}
+void ModbusTCP_RU::MbsRun() { serverProcess(); }
 
 void ModbusTCP_RU::serverProcess()
 {
-  if (!MbsServerStarted) {
-    MbServer.begin();
-    MbsServerStarted = true;
-#ifdef MB_DEBUG
-    Serial.println(F("MB server started"));
-#endif
-  }
-
-  for (byte slot = 0; slot < MB_MAX_CLIENTS; slot++) {
-    processServerClient(slot);
-  }
-
+  if (notifyingCoil || notifyingHolding) return;
+  begin();
+  for (byte slot = 0; slot < MB_MAX_CLIENTS; ++slot) processServerClient(slot);
   acceptServerClient();
 }
 
 void ModbusTCP_RU::acceptServerClient()
 {
-  EthernetClient newClient = MbServer.available();
-  if (!newClient) {
+  EthernetClient client = MbServer.accept();
+  if (!client) return;
+  client.setConnectionTimeout(0);
+  for (byte slot = 0; slot < MB_MAX_CLIENTS; ++slot) {
+#if MB_MAX_CLIENTS > 3
+    // On 32-bit boards MAX_SOCK_NUM may be 8 even with a four-socket W5100.
+    if (slot == 3 && Ethernet.hardwareStatus() == EthernetW5100) break;
+#endif
+    ServerClientState &state = serverClients[slot];
+    if (state.client) continue;
+    state.client = client;
+    state.length = 0;
+    state.expectedLength = 0;
+    state.responsePending = false;
+    state.lastActivity = millis();
+    state.frameStarted = 0;
+#ifdef MB_DEBUG
+    Serial.println(F("MB client connected"));
+#endif
     return;
   }
+  ++modbusStats.rejectedClients;
+  client.stop();
+}
 
-  for (byte slot = 0; slot < MB_MAX_CLIENTS; slot++) {
-    if (!serverClients[slot].client) {
-      serverClients[slot].client = newClient;
-      serverClients[slot].length = 0;
-      serverClients[slot].expectedLength = -1;
-      serverClients[slot].lastActivity = millis();
+void ModbusTCP_RU::clearServerClient(byte slot)
+{
+  ServerClientState &state = serverClients[slot];
+  if (state.client) {
+    state.client.setConnectionTimeout(0);
+    state.client.stop();
 #ifdef MB_DEBUG
-      Serial.println(F("MB client connected"));
+    Serial.println(F("MB client disconnected"));
 #endif
-      return;
-    }
   }
-
-  // EthernetServer.available() can return a client for an already tracked socket.
-  // Do not stop it here: on W5100/W5500 that can tear down the active SCADA link.
-  modbusStats.socketErrors++;
+  state.length = 0;
+  state.expectedLength = 0;
+  state.responsePending = false;
+  state.lastActivity = 0;
+  state.frameStarted = 0;
 }
 
 void ModbusTCP_RU::processServerClient(byte slot)
 {
   ServerClientState &state = serverClients[slot];
-  if (!state.client) {
+  if (!state.client) return;
+  // CLOSE_WAIT can still send a queued reply after the peer shuts down its TX side.
+  if (state.responsePending) {
+    transmitResponse(slot);
     return;
   }
-
-  unsigned long now = millis();
-
   if (!state.client.connected() && !state.client.available()) {
     clearServerClient(slot);
     return;
   }
-
-  if (state.length > 0 && (now - state.lastActivity) > MB_PACKET_TIMEOUT) {
-    clearServerClient(slot);
-    modbusStats.socketErrors++;
-    return;
-  }
-
-  if (MB_IDLE_TIMEOUT > 0 && state.length == 0 && (now - state.lastActivity) > MB_IDLE_TIMEOUT) {
+  const uint32_t now = millis();
+  // A total deadline also prevents a slow peer from holding a slot with single bytes.
+  if (state.length && (uint32_t)(now - state.frameStarted) >= MB_FRAME_TIMEOUT) {
+    ++modbusStats.timeouts;
     clearServerClient(slot);
     return;
   }
-
-  byte reads = 0;
-  while (state.client.available() && reads < MB_MAX_BYTES_PER_POLL) {
-    if (state.length >= MB_BUFFER_SIZE) {
+  if (!state.client.available()) {
+    const uint32_t timeout = state.length ? packetTimeout : idleTimeout;
+    if (timeout && (uint32_t)(now - state.lastActivity) >= timeout) {
+      ++modbusStats.timeouts;
       clearServerClient(slot);
-      modbusStats.socketErrors++;
-      return;
     }
-
-    state.buffer[state.length++] = state.client.read();
+    return;
+  }
+  // Read queued bytes before applying an inter-byte timeout: loop may have been busy.
+  for (uint16_t reads = 0; reads < MB_MAX_BYTES_PER_POLL && state.client.available(); ++reads) {
+    const int value = state.client.read();
+    if (value < 0) break;
+    if (!state.length) state.frameStarted = now;
+    state.buffer[state.length++] = (uint8_t)value;
     state.lastActivity = now;
-    reads++;
-
-    if (state.length >= 6 && state.expectedLength < 0) {
-      state.expectedLength = mbWord(state.buffer[4], state.buffer[5]) + 6;
-      if (state.expectedLength < 8 || state.expectedLength > MB_BUFFER_SIZE) {
+    if (state.length == 6) {
+      const word bodyLength = mbWord(state.buffer[4], state.buffer[5]);
+      if (state.buffer[2] || state.buffer[3] || bodyLength < 2 ||
+          bodyLength > 254 || bodyLength > MB_BUFFER_SIZE - 6) {
+        ++modbusStats.malformedFrames;
         clearServerClient(slot);
-        modbusStats.socketErrors++;
         return;
       }
+      state.expectedLength = bodyLength + 6;
     }
-
-    if (state.expectedLength > 0 && state.length >= state.expectedLength) {
-      modbusStats.rxPackets++;
+    if (state.expectedLength && state.length == state.expectedLength) {
+      ++modbusStats.rxPackets;
       processRequest(state);
-      state.length = 0;
-      state.expectedLength = -1;
-      state.lastActivity = millis();
+      transmitResponse(slot);
       return;
     }
   }
@@ -394,247 +164,184 @@ void ModbusTCP_RU::processServerClient(byte slot)
 void ModbusTCP_RU::processRequest(ServerClientState &state)
 {
   uint8_t *request = state.buffer;
-  byte fc = request[7];
-  MbsFC = SetFC(fc);
+  const byte fc = request[7];
+  const bool multiple = fc == 15 || fc == 16;
+  if (!(fc >= 1 && fc <= 6) && !multiple) {
+    sendException(state, MB_EX_ILLEGAL_FUNCTION);
+    return;
+  }
+  if ((!multiple && state.length != 12) || (multiple && state.length < 13)) {
+    ++modbusStats.malformedFrames;
+    sendException(state, MB_EX_ILLEGAL_DATA_VALUE);
+    return;
+  }
+  const word start = mbWord(request[8], request[9]);
+  const word data = mbWord(request[10], request[11]);
+  debugRequest("RX", fc, start, data);
 
-  if (MbsFC == MB_FC_NONE) {
-    sendException(state.client, request, MB_EX_ILLEGAL_FUNCTION);
-    MbsFC = MB_FC_NONE;
+  if (fc == 1 || fc == 2) {
+    const word limit = fc == 1 ? MB_MAX_COILS : MB_MAX_DISCRETE;
+    if (!isValidReadCount((MB_FC)fc, data)) {
+      sendException(state, MB_EX_ILLEGAL_DATA_VALUE);
+      return;
+    }
+    if (!isRangeValid(start, data, limit)) {
+      sendException(state, MB_EX_ILLEGAL_DATA_ADDRESS);
+      return;
+    }
+    const word bytes = (data + 7) / 8;
+    if (bytes > MB_BUFFER_SIZE - 9) {
+      sendException(state, MB_EX_ILLEGAL_DATA_VALUE);
+      return;
+    }
+    request[8] = (byte)bytes;
+    memset(request + 9, 0, bytes);
+    for (word i = 0; i < data; ++i) {
+      const bool value = fc == 1 ? MbCoils[start + i] : MbDiscreteInputs[start + i];
+      bitWrite(request[9 + i / 8], i % 8, value);
+    }
+    sendResponse(state, bytes + 9);
     return;
   }
 
-  word Start = 0;
-  word WordDataLength = 0;
-  word ByteDataLength = 0;
-  word CoilDataLength = 0;
-  uint16_t MessageLength = 0;
-
-  if (MbsFC == MB_FC_READ_COILS || MbsFC == MB_FC_READ_DISCRETE_INPUT) {
-    Start = mbWord(request[8], request[9]);
-    CoilDataLength = mbWord(request[10], request[11]);
-    word limit = (MbsFC == MB_FC_READ_COILS) ? MB_MAX_COILS : MB_MAX_DISCRETE;
-
-    debugRequest("RX", fc, Start, CoilDataLength);
-
-    if (!isValidReadCount(MbsFC, CoilDataLength)) {
-      sendException(state.client, request, MB_EX_ILLEGAL_DATA_VALUE);
-      MbsFC = MB_FC_NONE;
+  if (fc == 3 || fc == 4) {
+    const word limit = fc == 3 ? MB_MAX_HOLDING : MB_MAX_INPUT;
+    if (!isValidReadCount((MB_FC)fc, data)) {
+      sendException(state, MB_EX_ILLEGAL_DATA_VALUE);
       return;
     }
-    if (!isRangeValid(Start, CoilDataLength, limit)) {
-      sendException(state.client, request, MB_EX_ILLEGAL_DATA_ADDRESS);
-      MbsFC = MB_FC_NONE;
+    if (!isRangeValid(start, data, limit)) {
+      sendException(state, MB_EX_ILLEGAL_DATA_ADDRESS);
       return;
     }
-
-    ByteDataLength = (CoilDataLength + 7) / 8;
-    request[5] = ByteDataLength + 3;
-    request[8] = ByteDataLength;
-
-    for (word iByte = 0; iByte < ByteDataLength; iByte++) {
-      request[9 + iByte] = 0;
-      for (byte iBit = 0; iBit < 8; iBit++) {
-        word bitIndex = Start + iByte * 8 + iBit;
-        if (bitIndex < (Start + CoilDataLength)) {
-          bool value = (MbsFC == MB_FC_READ_COILS) ? MbCoils[bitIndex] : MbDiscreteInputs[bitIndex];
-          bitWrite(request[9 + iByte], iBit, value);
-        }
-      }
+    const word bytes = data * 2;
+    if (bytes > MB_BUFFER_SIZE - 9) {
+      sendException(state, MB_EX_ILLEGAL_DATA_VALUE);
+      return;
     }
-
-    MessageLength = ByteDataLength + 9;
-    sendResponse(state.client, request, MessageLength);
-    MbsFC = MB_FC_NONE;
+    request[8] = (byte)bytes;
+    for (word i = 0; i < data; ++i) {
+      const word value = fc == 3 ? MbHoldingRegisters[start + i] : MbInputRegisters[start + i];
+      request[9 + i * 2] = highByte(value);
+      request[10 + i * 2] = lowByte(value);
+    }
+    sendResponse(state, bytes + 9);
     return;
   }
 
-  if (MbsFC == MB_FC_READ_REGISTERS || MbsFC == MB_FC_READ_INPUT_REGISTER) {
-    Start = mbWord(request[8], request[9]);
-    WordDataLength = mbWord(request[10], request[11]);
-    word limit = (MbsFC == MB_FC_READ_REGISTERS) ? MB_MAX_HOLDING : MB_MAX_INPUT;
-    ByteDataLength = WordDataLength * 2;
-
-    debugRequest("RX", fc, Start, WordDataLength);
-
-    if (!isValidReadCount(MbsFC, WordDataLength)) {
-      sendException(state.client, request, MB_EX_ILLEGAL_DATA_VALUE);
-      MbsFC = MB_FC_NONE;
+  if (fc == 5 || fc == 6) {
+    if (!isRangeValid(start, 1, fc == 5 ? MB_MAX_COILS : MB_MAX_HOLDING)) {
+      sendException(state, MB_EX_ILLEGAL_DATA_ADDRESS);
       return;
     }
-    if (!isRangeValid(Start, WordDataLength, limit)) {
-      sendException(state.client, request, MB_EX_ILLEGAL_DATA_ADDRESS);
-      MbsFC = MB_FC_NONE;
+    if (fc == 5 && data != 0 && data != 0xFF00) {
+      sendException(state, MB_EX_ILLEGAL_DATA_VALUE);
       return;
     }
-
-    request[5] = ByteDataLength + 3;
-    request[8] = ByteDataLength;
-
-    for (word iWord = 0; iWord < WordDataLength; iWord++) {
-      word registerIndex = Start + iWord;
-      word value = (MbsFC == MB_FC_READ_REGISTERS) ? MbHoldingRegisters[registerIndex] : MbInputRegisters[registerIndex];
-      request[9 + iWord * 2] = highByte(value);
-      request[10 + iWord * 2] = lowByte(value);
-    }
-
-    MessageLength = ByteDataLength + 9;
-    sendResponse(state.client, request, MessageLength);
-    MbsFC = MB_FC_NONE;
+    if (fc == 5) CoilWrite(start, data == 0xFF00);
+    else Hreg(start, data);
+    sendResponse(state, 12);
     return;
   }
 
-  if (MbsFC == MB_FC_WRITE_COIL) {
-    Start = mbWord(request[8], request[9]);
-    word value = mbWord(request[10], request[11]);
-
-    debugRequest("RX", fc, Start, 1);
-
-    if (!isRangeValid(Start, 1, MB_MAX_COILS)) {
-      sendException(state.client, request, MB_EX_ILLEGAL_DATA_ADDRESS);
-      MbsFC = MB_FC_NONE;
-      return;
-    }
-    if (value != 0xFF00 && value != 0x0000) {
-      sendException(state.client, request, MB_EX_ILLEGAL_DATA_VALUE);
-      MbsFC = MB_FC_NONE;
-      return;
-    }
-
-    CoilWrite(Start, value == 0xFF00);
-    request[5] = 6;
-    sendResponse(state.client, request, 12);
-    MbsFC = MB_FC_NONE;
+  if (!isValidWriteCount((MB_FC)fc, data)) {
+    sendException(state, MB_EX_ILLEGAL_DATA_VALUE);
     return;
   }
-
-  if (MbsFC == MB_FC_WRITE_REGISTER) {
-    Start = mbWord(request[8], request[9]);
-
-    debugRequest("RX", fc, Start, 1);
-
-    if (!isRangeValid(Start, 1, MB_MAX_HOLDING)) {
-      sendException(state.client, request, MB_EX_ILLEGAL_DATA_ADDRESS);
-      MbsFC = MB_FC_NONE;
-      return;
-    }
-
-    Hreg(Start, mbWord(request[10], request[11]));
-    request[5] = 6;
-    sendResponse(state.client, request, 12);
-    MbsFC = MB_FC_NONE;
+  const word bytes = fc == 15 ? (data + 7) / 8 : data * 2;
+  if (request[12] != bytes || state.length != 13 + bytes) {
+    ++modbusStats.malformedFrames;
+    sendException(state, MB_EX_ILLEGAL_DATA_VALUE);
     return;
   }
-
-  if (MbsFC == MB_FC_WRITE_MULTIPLE_COILS) {
-    Start = mbWord(request[8], request[9]);
-    CoilDataLength = mbWord(request[10], request[11]);
-    ByteDataLength = (CoilDataLength + 7) / 8;
-
-    debugRequest("RX", fc, Start, CoilDataLength);
-
-    if (!isValidWriteCount(MbsFC, CoilDataLength) || request[12] != ByteDataLength) {
-      sendException(state.client, request, MB_EX_ILLEGAL_DATA_VALUE);
-      MbsFC = MB_FC_NONE;
-      return;
-    }
-    if (!isRangeValid(Start, CoilDataLength, MB_MAX_COILS)) {
-      sendException(state.client, request, MB_EX_ILLEGAL_DATA_ADDRESS);
-      MbsFC = MB_FC_NONE;
-      return;
-    }
-    if ((13 + ByteDataLength) > state.length) {
-      sendException(state.client, request, MB_EX_ILLEGAL_DATA_VALUE);
-      MbsFC = MB_FC_NONE;
-      return;
-    }
-
-    for (word iBit = 0; iBit < CoilDataLength; iBit++) {
-      CoilWrite(Start + iBit, bitRead(request[13 + (iBit / 8)], iBit % 8));
-    }
-
-    request[5] = 6;
-    sendResponse(state.client, request, 12);
-    MbsFC = MB_FC_NONE;
+  if (!isRangeValid(start, data, fc == 15 ? MB_MAX_COILS : MB_MAX_HOLDING)) {
+    sendException(state, MB_EX_ILLEGAL_DATA_ADDRESS);
     return;
   }
-
-  if (MbsFC == MB_FC_WRITE_MULTIPLE_REGISTERS) {
-    Start = mbWord(request[8], request[9]);
-    WordDataLength = mbWord(request[10], request[11]);
-    ByteDataLength = WordDataLength * 2;
-
-    debugRequest("RX", fc, Start, WordDataLength);
-
-    if (!isValidWriteCount(MbsFC, WordDataLength) || request[12] != ByteDataLength) {
-      sendException(state.client, request, MB_EX_ILLEGAL_DATA_VALUE);
-      MbsFC = MB_FC_NONE;
-      return;
-    }
-    if (!isRangeValid(Start, WordDataLength, MB_MAX_HOLDING)) {
-      sendException(state.client, request, MB_EX_ILLEGAL_DATA_ADDRESS);
-      MbsFC = MB_FC_NONE;
-      return;
-    }
-    if ((13 + ByteDataLength) > state.length) {
-      sendException(state.client, request, MB_EX_ILLEGAL_DATA_VALUE);
-      MbsFC = MB_FC_NONE;
-      return;
-    }
-
-    for (word iWord = 0; iWord < WordDataLength; iWord++) {
-      Hreg(Start + iWord, mbWord(request[13 + iWord * 2], request[14 + iWord * 2]));
-    }
-
-    request[5] = 6;
-    sendResponse(state.client, request, 12);
-    MbsFC = MB_FC_NONE;
-    return;
+  // Commit the entire validated range before notifying application callbacks.
+  for (word i = 0; i < data; ++i) {
+    if (fc == 15) setCoilLocal(start + i, bitRead(request[13 + i / 8], i % 8));
+    else setHoldingLocal(start + i, mbWord(request[13 + i * 2], request[14 + i * 2]));
   }
+  for (word i = 0; i < data; ++i) {
+    if (fc == 15) notifyCoil(start + i, bitRead(request[13 + i / 8], i % 8));
+    else notifyHolding(start + i, mbWord(request[13 + i * 2], request[14 + i * 2]));
+  }
+  sendResponse(state, 12);
 }
 
-void ModbusTCP_RU::sendException(EthernetClient &client, uint8_t *request, byte exceptionCode)
+void ModbusTCP_RU::sendResponse(ServerClientState &state, uint16_t length)
 {
-  request[4] = 0;
-  request[5] = 3;
-  request[7] = request[7] | 0x80;
-  request[8] = exceptionCode;
-  debugException(request[7], exceptionCode);
-  client.write(request, 9);
-  modbusStats.txPackets++;
-  modbusStats.exceptionCount++;
+  state.buffer[4] = highByte(length - 6);
+  state.buffer[5] = lowByte(length - 6);
+  state.length = length;
+  state.expectedLength = 0;
+  state.responsePending = true;
+  state.lastActivity = millis();
 }
 
-void ModbusTCP_RU::sendResponse(EthernetClient &client, uint8_t *response, uint16_t length)
+void ModbusTCP_RU::sendException(ServerClientState &state, byte exceptionCode)
 {
-  client.write(response, length);
-  modbusStats.txPackets++;
+  state.buffer[7] |= 0x80;
+  state.buffer[8] = exceptionCode;
+  debugException(state.buffer[7], exceptionCode);
+  ++modbusStats.exceptionCount;
+  sendResponse(state, 9);
 }
 
-void ModbusTCP_RU::clearServerClient(byte slot)
+void ModbusTCP_RU::transmitResponse(byte slot)
 {
-  if (serverClients[slot].client) {
-    serverClients[slot].client.stop();
-#ifdef MB_DEBUG
-    Serial.println(F("MB client disconnected"));
-#endif
+  ServerClientState &state = serverClients[slot];
+  if (!state.responsePending) return;
+  if (responseTimeout && (uint32_t)(millis() - state.lastActivity) >= responseTimeout) {
+    ++modbusStats.timeouts;
+    ++modbusStats.socketErrors;
+    clearServerClient(slot);
+    return;
   }
-  serverClients[slot].length = 0;
-  serverClients[slot].expectedLength = -1;
-  serverClients[slot].lastActivity = 0;
+  const int available = state.client.availableForWrite();
+  if (available < 0 || (uint16_t)available < state.length) return;
+  // Ethernet 2.x still waits for hardware SEND_OK inside write().
+  if (state.client.write(state.buffer, state.length) != state.length) {
+    ++modbusStats.socketErrors;
+    clearServerClient(slot);
+    return;
+  }
+  ++modbusStats.txPackets;
+  state.length = 0;
+  state.responsePending = false;
+  state.frameStarted = 0;
+  state.lastActivity = millis();
 }
 
-MB_FC ModbusTCP_RU::SetFC(int fc)
+bool ModbusTCP_RU::setCoilLocal(word address, bool value)
 {
-  MB_FC FC = MB_FC_NONE;
-  if (fc == 1) FC = MB_FC_READ_COILS;
-  if (fc == 2) FC = MB_FC_READ_DISCRETE_INPUT;
-  if (fc == 3) FC = MB_FC_READ_REGISTERS;
-  if (fc == 4) FC = MB_FC_READ_INPUT_REGISTER;
-  if (fc == 5) FC = MB_FC_WRITE_COIL;
-  if (fc == 6) FC = MB_FC_WRITE_REGISTER;
-  if (fc == 15) FC = MB_FC_WRITE_MULTIPLE_COILS;
-  if (fc == 16) FC = MB_FC_WRITE_MULTIPLE_REGISTERS;
-  return FC;
+  if (address >= MB_MAX_COILS) return false;
+  MbCoils[address] = value;
+  return true;
+}
+
+bool ModbusTCP_RU::setHoldingLocal(word address, word value)
+{
+  if (address >= MB_MAX_HOLDING) return false;
+  MbHoldingRegisters[address] = value;
+  return true;
+}
+
+void ModbusTCP_RU::notifyCoil(word address, bool value)
+{
+  if (!coilWriteCallback || notifyingCoil) return;
+  notifyingCoil = true;
+  coilWriteCallback(address, value);
+  notifyingCoil = false;
+}
+
+void ModbusTCP_RU::notifyHolding(word address, word value)
+{
+  if (!holdingWriteCallback || notifyingHolding) return;
+  notifyingHolding = true;
+  holdingWriteCallback(address, value);
+  notifyingHolding = false;
 }
 
 word ModbusTCP_RU::GetDataLen()
@@ -672,13 +379,8 @@ word ModbusTCP_RU::Hreg(word address) const
 
 bool ModbusTCP_RU::Hreg(word address, word value)
 {
-  if (address >= MB_MAX_HOLDING) {
-    return false;
-  }
-  MbHoldingRegisters[address] = value;
-  if (holdingWriteCallback) {
-    holdingWriteCallback(address, value);
-  }
+  if (!setHoldingLocal(address, value)) return false;
+  notifyHolding(address, value);
   return true;
 }
 
@@ -709,13 +411,8 @@ bool ModbusTCP_RU::CoilRead(word address) const
 
 bool ModbusTCP_RU::CoilWrite(word address, bool value)
 {
-  if (address >= MB_MAX_COILS) {
-    return false;
-  }
-  MbCoils[address] = value;
-  if (coilWriteCallback) {
-    coilWriteCallback(address, value);
-  }
+  if (!setCoilLocal(address, value)) return false;
+  notifyCoil(address, value);
   return true;
 }
 
@@ -746,18 +443,6 @@ boolean ModbusTCP_RU::SetBit(word Number, boolean Data)
   return !CoilWrite(Number, Data);
 }
 
-void ModbusTCP_RU::onCoilWrite(word address, ModbusCoilWriteCallback callback)
-{
-  (void)address;
-  coilWriteCallback = callback;
-}
-
-void ModbusTCP_RU::onHoldingWrite(word address, ModbusHoldingWriteCallback callback)
-{
-  (void)address;
-  holdingWriteCallback = callback;
-}
-
 void ModbusTCP_RU::onCoilWrite(ModbusCoilWriteCallback callback)
 {
   coilWriteCallback = callback;
@@ -770,7 +455,7 @@ void ModbusTCP_RU::onHoldingWrite(ModbusHoldingWriteCallback callback)
 
 uint32_t ModbusTCP_RU::ReadUInt32(word address, MB_WORD_ORDER order) const
 {
-  if ((address + 1) >= MB_MAX_HOLDING) {
+  if (!isRangeValid(address, 2, MB_MAX_HOLDING)) {
     return 0;
   }
 
@@ -793,7 +478,7 @@ int32_t ModbusTCP_RU::ReadInt32(word address, MB_WORD_ORDER order) const
 float ModbusTCP_RU::ReadFloat(word address, MB_WORD_ORDER order) const
 {
   word regs[2];
-  if ((address + 1) >= MB_MAX_HOLDING) {
+  if (!isRangeValid(address, 2, MB_MAX_HOLDING)) {
     return 0.0f;
   }
   regs[0] = MbHoldingRegisters[address];
@@ -803,19 +488,21 @@ float ModbusTCP_RU::ReadFloat(word address, MB_WORD_ORDER order) const
 
 bool ModbusTCP_RU::WriteUInt32(word address, uint32_t value, MB_WORD_ORDER order)
 {
-  if ((address + 1) >= MB_MAX_HOLDING) {
+  if (!isRangeValid(address, 2, MB_MAX_HOLDING)) {
     return false;
   }
 
   word highWord = (word)(value >> 16);
   word lowWord = (word)(value & 0xFFFF);
   if (order == MB_WORD_ORDER_SWAPPED) {
-    Hreg(address, lowWord);
-    Hreg(address + 1, highWord);
+    setHoldingLocal(address, lowWord);
+    setHoldingLocal(address + 1, highWord);
   } else {
-    Hreg(address, highWord);
-    Hreg(address + 1, lowWord);
+    setHoldingLocal(address, highWord);
+    setHoldingLocal(address + 1, lowWord);
   }
+  notifyHolding(address, MbHoldingRegisters[address]);
+  notifyHolding(address + 1, MbHoldingRegisters[address + 1]);
   return true;
 }
 
@@ -826,14 +513,16 @@ bool ModbusTCP_RU::WriteInt32(word address, int32_t value, MB_WORD_ORDER order)
 
 bool ModbusTCP_RU::WriteFloat(word address, float value, MB_WORD_ORDER order)
 {
-  if ((address + 1) >= MB_MAX_HOLDING) {
+  if (!isRangeValid(address, 2, MB_MAX_HOLDING)) {
     return false;
   }
 
   word regs[2];
   floatToRegs(value, regs, order);
-  Hreg(address, regs[0]);
-  Hreg(address + 1, regs[1]);
+  setHoldingLocal(address, regs[0]);
+  setHoldingLocal(address + 1, regs[1]);
+  notifyHolding(address, regs[0]);
+  notifyHolding(address + 1, regs[1]);
   return true;
 }
 
@@ -874,16 +563,6 @@ const ModbusStats& ModbusTCP_RU::stats() const
 void ModbusTCP_RU::resetStats()
 {
   memset(&modbusStats, 0, sizeof(modbusStats));
-}
-
-bool ModbusTCP_RU::IsValidRegister(word index)
-{
-  return index < MB_MAX_HOLDING;
-}
-
-bool ModbusTCP_RU::IsValidBit(word index)
-{
-  return index < MB_MAX_COILS;
 }
 
 bool ModbusTCP_RU::isRangeValid(word start, word count, word limit)

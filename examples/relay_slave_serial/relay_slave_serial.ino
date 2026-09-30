@@ -3,7 +3,7 @@
  *
  * FC01: read coil 0
  * FC05/FC15: write coil 0
- * FC04: read input register 0, actual relay state
+ * FC04: read input register 0, commanded relay state (no feedback)
  */
 
 #include <SPI.h>
@@ -15,6 +15,7 @@ ModbusTCP_RU Mb;
 byte mac[] = {0x90, 0xA2, 0xDA, 0x0D, 0x3F, 0xCD};
 IPAddress ip(192, 168, 1, 100);
 IPAddress gateway(192, 168, 1, 1);
+IPAddress dnsServer(192, 168, 1, 1);
 IPAddress subnet(255, 255, 255, 0);
 
 const byte RELAY_PIN = 2;
@@ -43,9 +44,8 @@ void setup() {
   Mb.Ireg(IREG_RELAY_STATE, 0);
   Mb.onCoilWrite(onCoilWrite);
 
-  Ethernet.begin(mac, ip, gateway, subnet);
+  Ethernet.begin(mac, ip, dnsServer, gateway, subnet);
   Mb.begin();
-  delay(1000);
 
   Serial.println(F("ModbusTCP_RU SCADA Slave started"));
   Serial.print(F("IP: "));

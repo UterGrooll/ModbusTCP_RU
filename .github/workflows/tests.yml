@@ -1,0 +1,24 @@
+name: Library tests
+on: [push, pull_request]
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Regression and configuration tests
+        shell: pwsh
+        run: ./tests/run.ps1
+  nano:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - run: arduino-cli core update-index
+      - run: arduino-cli core install arduino:avr
+      - run: arduino-cli lib install "Ethernet@2.0.2"
+      - run: arduino-cli lib install "GyverHTU21D@1.1.2"
+      - name: Build all examples
+        run: |
+          for example in relay_slave_lite relay_slave_serial relay_slave_watchdog sensor_htu21d_lite sensor_htu21d_serial; do
+            arduino-cli compile --fqbn arduino:avr:nano:cpu=atmega328old --library . --warnings all "examples/$example"
+          done
