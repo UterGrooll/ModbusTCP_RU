@@ -30,3 +30,4 @@ $output = (& $Compiler @common -DARDUINO_ARCH_AVR (Join-Path $hostPath 'config_m
 if ($LASTEXITCODE -eq 0 -or $output -notmatch 'undefined reference.*ModbusTCP_RU') { throw "Configuration mismatch not diagnosed: $output" }
 Write-Output 'PASS per-sketch layout mismatch rejected at link'
 Write-Output "Build outputs: $BuildPath"
+exit 0
